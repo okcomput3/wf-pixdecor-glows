@@ -359,72 +359,6 @@ wf::geometry_t get_bounding_box() override
         }
     }
 
-/*
-
-   void render_shader(const wf::scene::render_instruction_t& data, wf::point_t origin)
-    {
-        auto view = _view.lock();
-        if (!view) return;
-
-        init_shader();
-
-        int extension = int(shader_extension);
-        
-        const auto& target = data.target;
-        int fb_width  = target.geometry.width;
-        int fb_height = target.geometry.height;
-        auto ortho = glm::ortho(0.0f, (float)fb_width, (float)fb_height, 0.0f);
-
-        wf::gles::bind_render_buffer(target);
-        GL_CALL(glEnable(GL_BLEND));
-        GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-        
-        animation_time += 0.016f;
-        const float spacing_per_layer = 40.0f;
-
-        
-        {
-            int spacing = static_cast<int>(2* spacing_per_layer);
-
-            int local_start_x = origin.x - extension - spacing;
-            int local_start_y = origin.y - extension - spacing;
-
-            int layer_width = size.width + 2 * extension + 2 * spacing;
-            int layer_height = size.height + 2 * extension + 2 * spacing;
-
-            shader_program.use(wf::TEXTURE_TYPE_RGBA);
-            shader_program.uniformMatrix4f("mvp", ortho);
-            shader_program.uniform2f("resolution", (float)layer_width, (float)layer_height);
-            shader_program.uniform1f("time", animation_time + 0* 0.05f);
-
-            float alpha = 0.05f + (1.0f  / 20.0f) * 0.2f;
-            glm::vec4 layer_color(1.0f, 1.0f, 1.0f, 1.0);
-            shader_program.uniform4f("color", layer_color);
-
-            GLfloat x = local_start_x;
-            GLfloat y = local_start_y;
-            GLfloat w = layer_width;
-            GLfloat h = layer_height;
-
-            GLfloat vertexData[] = { x, y, x + w, y, x + w, y + h, x, y + h };
-            GLfloat texData[] = { 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f };
-
-            shader_program.attrib_pointer("position", 2, 0, vertexData);
-            shader_program.attrib_pointer("texcoord", 2, 0, texData);
-            GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, 4));
-            shader_program.deactivate();
-        }
-
-        GL_CALL(glDisable(GL_BLEND));
-        
-        // Schedule next frame damage to keep animation running
-        // Also damage the view's surface to prevent artifacts
-        wf::scene::damage_node(shared_from_this(), get_bounding_box());
-        if (view)
-        {
-            view->damage();
-        }
-    }*/
 
     class shader_render_instance_t : public wf::scene::render_instance_t
     {
@@ -721,16 +655,12 @@ simple_decoration_node_t(wayfire_toplevel_view view) :
             self->connect(&on_surface_damage);
         }
 
-       void schedule_instructions(std::vector<wf::scene::render_instruction_t>& instructions,
+void schedule_instructions(std::vector<wf::scene::render_instruction_t>& instructions,
     const wf::render_target_t& target, wf::region_t& damage) override
 {
     auto our_region = self->cached_region + self->get_offset();
-    auto bbox = self->get_bounding_box();
-    wf::region_t extended_region{bbox};
-    
-    our_region |= extended_region;
-    
     wf::region_t our_damage = damage & our_region;
+    
     if (!our_damage.empty())
     {
         instructions.push_back(wf::scene::render_instruction_t{
@@ -936,27 +866,29 @@ void render(const wf::scene::render_instruction_t& data) override
         }
     }
 
-    void resize(wf::dimensions_t dims)
-    {
-        auto view = _view.lock();
-        if (!view) return;
+void resize(wf::dimensions_t dims)
+{
+    auto view = _view.lock();
+    if (!view) return;
 
-        theme.set_maximize(view->pending_tiled_edges());
-        layout.set_maximize(maximized_shadows ? 0 : view->pending_tiled_edges());
-        
-        // Damage old bounding box before changing size
-        wf::scene::damage_node(shared_from_this(), get_bounding_box());
-        
-        size = dims;
-        layout.resize(size.width, size.height);
-        if (!view->toplevel()->current().fullscreen)
-        {
-            this->cached_region = layout.calculate_region();
-        }
-        
-        // Damage new bounding box after changing size
-        wf::scene::damage_node(shared_from_this(), get_bounding_box());
+    // Damage EVERYTHING before changing
+    view->damage();
+    wf::scene::damage_node(shared_from_this(), get_bounding_box());
+
+    theme.set_maximize(view->pending_tiled_edges());
+    layout.set_maximize(maximized_shadows ? 0 : view->pending_tiled_edges());
+    
+    size = dims;
+    layout.resize(size.width, size.height);
+    if (!view->toplevel()->current().fullscreen)
+    {
+        this->cached_region = layout.calculate_region();
     }
+    
+    // Damage EVERYTHING after changing
+    wf::scene::damage_node(shared_from_this(), get_bounding_box());
+    view->damage();
+}
 
     void update_decoration_size()
     {
@@ -1020,22 +952,20 @@ simple_decorator_t::simple_decorator_t(wayfire_toplevel_view view)
         deco->current_titlebar
     );
 
-    auto handle_state_change = [this] ()
-    {
-        deco->update_decoration_size();
-        deco->resize(wf::dimensions(this->view->get_geometry()));
-        
-        // Update shader node as well
-        shader_node->update_size(
-            wf::dimensions(this->view->get_geometry()),
-            deco->current_thickness,
-            deco->current_titlebar
-        );
-        
-        wf::get_core().tx_manager->schedule_object(this->view->toplevel());
-        wf::scene::damage_node(deco, deco->get_bounding_box());
-        wf::scene::damage_node(shader_node, shader_node->get_bounding_box());
-    };
+  auto handle_state_change = [this] ()
+{
+    deco->update_decoration_size();  // This updates current_thickness and current_titlebar
+    deco->resize(wf::dimensions(this->view->get_geometry()));
+    
+    // Update shader node with the NEW decoration parameters
+    shader_node->update_size(
+        wf::dimensions(this->view->get_geometry()),
+        deco->current_thickness,
+        deco->current_titlebar
+    );
+    
+    wf::get_core().tx_manager->schedule_object(this->view->toplevel());
+};
 
     on_view_activated = [this] (auto)
     {
@@ -1043,23 +973,30 @@ simple_decorator_t::simple_decorator_t(wayfire_toplevel_view view)
         wf::scene::damage_node(shader_node, shader_node->get_bounding_box());
     };
 
-    on_view_geometry_changed = [this] (auto)
-    {
-        // Damage old positions before resize
-        wf::scene::damage_node(deco, deco->get_bounding_box());
-        wf::scene::damage_node(shader_node, shader_node->get_bounding_box());
-        
-        deco->resize(wf::dimensions(this->view->get_geometry()));
-        shader_node->update_size(
-            wf::dimensions(this->view->get_geometry()),
-            deco->current_thickness,
-            deco->current_titlebar
-        );
-        
-        // Damage new positions after resize
-        wf::scene::damage_node(deco, deco->get_bounding_box());
-        wf::scene::damage_node(shader_node, shader_node->get_bounding_box());
-    };
+on_view_geometry_changed = [this] (auto)
+{
+    // Force complete redraw
+    this->view->damage();
+    
+    wf::scene::damage_node(shader_node, shader_node->get_bounding_box());
+    wf::scene::damage_node(deco, deco->get_bounding_box());
+    
+    deco->update_decoration_size();
+    deco->resize(wf::dimensions(this->view->get_geometry()));
+    
+    shader_node->update_size(
+        wf::dimensions(this->view->get_geometry()),
+        deco->current_thickness,
+        deco->current_titlebar
+    );
+    
+    wf::get_core().tx_manager->schedule_object(this->view->toplevel());
+    
+    // Force complete redraw again
+    this->view->damage();
+    wf::scene::damage_node(shader_node, shader_node->get_bounding_box());
+    wf::scene::damage_node(deco, deco->get_bounding_box());
+};
 
     on_view_tiled = [=] (auto) { handle_state_change(); };
     on_view_fullscreen = [=] (auto) { handle_state_change(); };
